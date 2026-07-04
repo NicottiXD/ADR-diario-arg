@@ -30,28 +30,54 @@ app = Flask(__name__)
 
 
 def fetch_watchlist(watchlist):
-    """Descarga OHLC, cierre anterior y variación % de la watchlist."""
-    tickers = yf.Tickers(" ".join(watchlist))
+    """
+    Descarga OHLC, cierre anterior y variación % de la watchlist.
+
+    Usa yf.download() en batch (una sola request HTTP para todos los
+    tickers) en vez de pedir .info ticker por ticker. Esto es mucho más
+    rápido y evita pasarse del límite de tiempo de ejecución en Vercel.
+    """
     rows = []
+
+    try:
+        data = yf.download(
+            tickers=" ".join(watchlist),
+            period="2d",       # hoy + ayer, para tener el cierre anterior
+            interval="1d",
+            group_by="ticker",
+            progress=False,
+            threads=True,
+        )
+    except Exception as e:
+        logging.error(f"Error al descargar datos en batch: {e}")
+        data = None
 
     for symbol in watchlist:
         try:
-            tk = tickers.tickers.get(symbol)
-            if tk:
-                info = tk.info
-                rows.append({
-                    'Ticker': symbol,
-                    'Apertura': info.get('regularMarketOpen', info.get('open', np.nan)),
-                    'Máximo': info.get('regularMarketDayHigh', info.get('dayHigh', np.nan)),
-                    'Mínimo': info.get('regularMarketDayLow', info.get('dayLow', np.nan)),
-                    'Precio': info.get('regularMarketPrice', np.nan),
-                    'Cierre anterior': info.get('regularMarketPreviousClose', info.get('previousClose', np.nan)),
-                    'Variación %': info.get('regularMarketChangePercent', np.nan)
-                })
-            else:
-                logging.warning(f"No se encontró info para {symbol}")
+            if data is None or symbol not in data.columns.get_level_values(0):
+                raise ValueError("sin datos")
+
+            hist = data[symbol].dropna(how='all')
+            if hist.empty:
+                raise ValueError("historial vacío")
+
+            last = hist.iloc[-1]
+            prev_close = hist['Close'].iloc[-2] if len(hist) >= 2 else np.nan
+
+            o, h, l, c = last['Open'], last['High'], last['Low'], last['Close']
+            pct = ((c - prev_close) / prev_close * 100) if prev_close and not pd.isna(prev_close) else np.nan
+
+            rows.append({
+                'Ticker': symbol,
+                'Apertura': o,
+                'Máximo': h,
+                'Mínimo': l,
+                'Precio': c,
+                'Cierre anterior': prev_close,
+                'Variación %': pct
+            })
         except Exception as e:
-            logging.error(f"Error al procesar {symbol}: {e}")
+            logging.warning(f"Sin datos para {symbol}: {e}")
             rows.append({
                 'Ticker': symbol, 'Apertura': np.nan, 'Máximo': np.nan,
                 'Mínimo': np.nan, 'Precio': np.nan, 'Cierre anterior': np.nan, 'Variación %': np.nan
